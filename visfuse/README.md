@@ -75,6 +75,23 @@ Fully supported:
 - `fsspec` — abstract filesystem interface
 - `mfusepy` (optional) — FUSE bindings for the mount CLI
 
+## Relationship to xarray-ms
+
+**xarray-ms already does most of the heavy lifting.** You can do
+`xr.open_datatree("test.ms", engine="xarray-ms")` today and get a lazy MSv4
+xarray DataTree — no visfuse needed for Python-side access.
+
+What visfuse adds on top:
+- **FUSE mount** — non-Python tools (CARTA, shell scripts, `ls`/`cat`) can see
+  Zarr directories on disk without any code
+- **fsspec interface** — tools that speak fsspec but not xarray-ms get access
+- **Directory of MSes** — browse multiple MS tables as a single Zarr tree
+
+If your workflow is entirely Python/xarray, you probably don't need visfuse —
+just use xarray-ms directly. visfuse is for the OS-level filesystem illusion.
+
+See: https://github.com/ratt-ru/xarray-ms
+
 ## Status
 
 Proof of concept / workshop demo.

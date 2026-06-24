@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "visfuse"
+version = "0.1.0"
+description = "Dynamic filesystem presenting Casacore Measurement Sets as Zarr stores"
+requires-python = ">=3.11"
+dependencies = [
+    "arcae",
+    "xarray-ms",
+    "xarray>=2024.1",
+    "dask[array]",
+    "zarr>=3",
+    "fsspec",
+    "numpy",
+]
+
+[project.optional-dependencies]
+fuse = ["mfusepy"]
+dev = ["pytest", "ipython"]
+
+[project.scripts]
+visfuse = "visfuse.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

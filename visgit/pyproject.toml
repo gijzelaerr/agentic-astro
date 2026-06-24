@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "visgit"
+version = "0.1.0"
+description = "Git for visibilities — version-controlled radio astronomy data pipelines"
+requires-python = ">=3.11"
+dependencies = [
+    "icechunk",
+    "arcae",
+    "xarray-ms",
+    "xarray>=2024.1",
+    "dask[array]",
+    "zarr>=3",
+    "numpy",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ipython"]
+
+[project.scripts]
+visgit = "visgit.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,1 @@
+"""visgit — git for visibilities."""

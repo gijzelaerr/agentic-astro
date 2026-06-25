@@ -1,19 +1,20 @@
-# Stimela3 Python API — Draft v0.1
+# Stimela3 Python API — Draft v0.2
 
 **Date**: 2026-06-25
-**Status**: First iteration, for discussion
+**Status**: Second iteration, incorporating feedback from Oleg
 **Goal**: Show what real Stimela recipes look like in Python, side-by-side with the YAML
 
 ---
 
 ## Design Principles
 
-1. **Recipes are Python functions.** A `@stimela.recipe` decorator marks a function as a recipe. Parameters become recipe inputs.
-2. **Steps are function calls.** `stimela.run("cab_name", param=value)` runs a cab and returns its outputs.
+1. **Recipes are Python functions.** A `@stimela.recipe` decorator marks a function as a recipe. Parameters become recipe inputs/outputs.
+2. **Cabs are importable objects.** `from cultcargo.cabs import wsclean` — then call `wsclean(ms=ms, size=4096)`. No string-based lookup.
 3. **Python IS the control flow.** No `assign_based_on`, no `=IF(VALID(...))`, no `for_loop` YAML keyword. Use `if`, `for`, f-strings.
 4. **Sub-recipes are function calls.** Composability = calling one recipe from another.
-5. **Existing cab definitions work unchanged.** YAML cabs from cultcargo load into the same registry. No migration needed for cabs.
-6. **The caracal lesson**: No `recipe.add()`. No manual parameter dicts. No god functions. Structure comes from the decorator pattern and function composition, not discipline.
+5. **`Annotated` for metadata.** Use `Annotated[type, Out, Info("...")]` to mark outputs and add docstrings to parameters. Inputs are the default.
+6. **Existing cab definitions work unchanged.** YAML cabs from cultcargo are auto-exposed as importable Cab objects. No migration needed.
+7. **The caracal lesson**: No `recipe.add()`. No manual parameter dicts. No god functions. Structure comes from the decorator pattern and function composition, not discipline.
 
 ---
 
@@ -98,43 +99,45 @@ recipe:
 
 ```python
 import stimela
-from stimela import Choices
+from stimela import Info, Out
+from typing import Annotated
+from cultcargo.cabs import simms, cubical, wsclean, aimfast, test_callable
 
 @stimela.recipe
-def selfcal(ms: str, scale: str = "30asec", band_name: str = ""):
+def selfcal(
+    ms: Annotated[str, Info("input measurement set")],
+    scale: Annotated[str, Info("image scale")] = "30asec",
+    band_name: Annotated[str, Info("band label")] = "",
+):
     """One round of calibration + imaging + evaluation."""
-    cal = stimela.run("cubical", ms=ms, jones=["B", "G"])
+    cal = cubical(ms=ms, jones=["B", "G"])
 
-    img = stimela.run("wsclean", ms=ms, scale=scale, dummy2=band_name)
+    img = wsclean(ms=ms, scale=scale, dummy2=band_name)
 
-    stimela.run("aimfast", image=img.restored, dirty=img.dirty)
+    aimfast(image=img.restored, dirty=img.dirty)
 
     return img
 
 
 @stimela.recipe
 def demo_recipe(
-    msname: str,
-    telescope: str = "kat-7",
-    band: Choices["L", "UHF", "K"] = "L",
+    msname: Annotated[str, Info("MS name to simulate")],
+    telescope: Annotated[str, Info("telescope model")] = "kat-7",
+    band: Annotated[stimela.Choices["L", "UHF", "K"], Info("frequency band")] = "L",
 ):
     """Demo pipeline: simulate MS, then selfcal."""
-    # Python replaces assign_based_on
     if band == "L":
         band_label = f"band1-{band}"
-        dummy_default = 1000
     elif band == "UHF":
         band_label = f"band2-{band}"
-        dummy_default = 2000
     else:
         band_label = band
-        dummy_default = None
 
-    stimela.run("test_callable", a=1, b="foo")
+    test_callable(a=1, b="foo")
 
-    ms = stimela.run("simms", msname=msname, synthesis=0.128)
+    ms = simms(msname=msname, synthesis=0.128)
 
-    # Sub-recipe is a function call
+    # Sub-recipe is just a function call
     selfcal(ms=ms.ms, band_name=band_label)
 ```
 
@@ -145,6 +148,8 @@ def demo_recipe(
 - Nested recipe definition → separate function (composable, testable)
 - `aliases` → function arguments (explicit parameter passing)
 - `"{previous.restored}"` → `img.restored` (typed attribute access)
+- `cab: wsclean` → `from cultcargo.cabs import wsclean` (IDE autocomplete)
+- `info: "..."` → `Annotated[type, Info("...")]` (parameter docs)
 
 ---
 
@@ -314,47 +319,78 @@ def cubical_image_loop(ms: str, output_dir: str = "output"):
 
 ## The API Surface
 
-### Core functions
+### Cab objects
 
 ```python
-stimela.run(cab_name, **params) -> RunResult
+from cultcargo.cabs import wsclean
+
+result = wsclean(ms="obs.ms", size=4096)
 ```
 
-Runs a cab. Loads the cab definition from the registry (YAML or Python), validates parameters via pydantic, constructs the command line, dispatches to the configured backend. Returns a `RunResult` with output attributes.
+Cabs are importable objects from their parent packages. Each YAML cab definition in
+cultcargo (or breifast, pfb_imaging, etc.) is auto-exposed as an importable `Cab` object.
+Calling the cab validates parameters, constructs the command, and dispatches to the backend.
+Returns a typed result object.
+
+This gives **IDE autocomplete on cab names** at import time, and makes dependencies
+explicit — you can see which cabs a recipe uses by reading the imports.
+
+### Parameter annotations
+
+```python
+from typing import Annotated
+from stimela import Info, Out
+
+@stimela.recipe
+def my_recipe(
+    ms: Annotated[stimela.MS, Info("input measurement set")],
+    dir_out: Annotated[stimela.Directory, Out, Info("output directory")],
+    ncpu: Annotated[int, Info("number of CPUs")] = 4,
+):
+```
+
+- **`Info("...")`** — parameter documentation string. Used for `stimela doc`, CLI help text,
+  and generated documentation. Equivalent to YAML's `info:` field.
+- **`Out`** — marks a parameter as an output. Without it, parameters are inputs (the default).
+  Equivalent to placing a parameter under `outputs:` vs `inputs:` in YAML.
+- Parameters use standard `Annotated` (PEP 593), the same mechanism used by FastAPI and pydantic.
+
+### Parallel execution
 
 ```python
 stimela.parallel() -> ParallelContext
 ```
 
-Context manager for parallel execution. Steps launched via `pool.run()` or `pool.call()` execute concurrently. Results are available after the context exits.
-
-### Decorators
-
-```python
-@stimela.recipe
-def my_recipe(param: type = default): ...
-```
-
-Marks a function as a Stimela recipe. The function's signature defines the recipe's inputs. Type annotations provide the schema. Generates a CLI via Click when run from the command line.
-
-```python
-@stimela.cab(command="tool_name")
-def my_cab(input1: str, input2: int = 0) -> stimela.Outputs(out=File): ...
-```
-
-Optional: define a cab in Python instead of YAML. The decorator generates the same internal representation as the YAML cab loader.
+Context manager for parallel execution. Steps launched via `pool.run()` or `pool.call()`
+execute concurrently. Results are available after the context exits.
 
 ### Result objects
 
 ```python
-result = stimela.run("wsclean", ms="obs.ms", size=4096)
+result = wsclean(ms="obs.ms", size=4096)
 result.restored     # output file path (typed)
 result.dirty        # another output
-result.success      # bool
-result.log          # log output
 ```
 
-Outputs are accessible as typed attributes. The attribute names come from the cab's output schema.
+Outputs are accessible as typed attributes. The attribute names come from the cab's
+output schema (YAML `outputs:` section or Python `Out`-annotated return fields).
+
+### Python cab definitions (optional)
+
+```python
+@stimela.cab(command="wsclean")
+def wsclean(
+    ms: Annotated[stimela.MS, Info("input measurement set")],
+    size: Annotated[int, Info("image size in pixels")] = 4096,
+    restored: Annotated[stimela.File, Out, Info("restored image")] = None,
+    dirty: Annotated[stimela.File, Out, Info("dirty image")] = None,
+):
+    ...
+```
+
+New cabs can be defined in Python using the same `Annotated`/`Out`/`Info` pattern.
+The decorator generates the same internal representation as the YAML loader.
+YAML and Python cabs coexist in the same registry.
 
 ### Backend selection
 
@@ -367,7 +403,7 @@ backend: singularity
 def my_recipe(): ...
 
 # Per-step
-stimela.run("wsclean", ms=ms, _backend="kube")
+wsclean(ms=ms, _backend="kube")
 ```
 
 ### Running from CLI
@@ -387,63 +423,15 @@ stimela exec pipeline.py demo_recipe msname=obs.ms -b singularity
 
 ## What About `{previous.restored}`?
 
-In YAML recipes, `{previous.restored}` refers to the previous step's output. In Python, this is just a variable:
+In YAML recipes, `{previous.restored}` refers to the previous step's output. In Python,
+this is just a variable:
 
 ```python
-# YAML way:
-#   image: "{previous.restored}"
-
-# Python way — the variable IS the reference:
-img = stimela.run("wsclean", ...)
-stimela.run("aimfast", image=img.restored)
+img = wsclean(ms=ms, size=4096)
+aimfast(image=img.restored)
 ```
 
 No substitution engine needed. Python's scoping rules handle it.
-
----
-
-## What About Wranglers?
-
-Wranglers (regex-based output processors) are a cab-level concern, not a recipe concern. They stay in the YAML cab definition:
-
-```yaml
-# In cultcargo cab definition (unchanged)
-cabs:
-  wsclean:
-    wranglers:
-      "error reading file (.*)": DeclareError
-      "WARNING: (.*)": ChangeSeverity WARNING
-```
-
-Or in Python cab definitions:
-
-```python
-@stimela.cab(
-    command="wsclean",
-    wranglers={
-        r"error reading file (.*)": stimela.DeclareError,
-        r"WARNING: (.*)": stimela.ChangeSeverity("WARNING"),
-    },
-)
-def wsclean(ms: MS, size: int = 4096) -> stimela.Outputs(restored=File):
-    ...
-```
-
----
-
-## What About `nom_de_guerre`?
-
-Gone. In Python cabs, the parameter name IS the CLI flag name. If a tool uses a different flag:
-
-```python
-@stimela.cab(command="cubical")
-def cubical(
-    ms: MS = stimela.Param(cli_name="data-ms"),
-):
-    ...
-```
-
-Or just name the parameter what the tool expects and use a descriptive docstring.
 
 ---
 
@@ -453,7 +441,9 @@ Or just name the parameter what the tool expects and use a descriptive docstring
 |--------|-----------------|-------------------|
 | Recipe definition | YAML block with `name`, `inputs`, `steps` | Function with `@stimela.recipe` decorator |
 | Parameter schema | `dtype`, `required`, `choices` fields | Type annotations + defaults |
-| Step invocation | `cab: wsclean` under `steps:` | `stimela.run("wsclean", ...)` |
+| Parameter docs | `info: "description"` | `Annotated[type, Info("description")]` |
+| Input vs output | `inputs:` / `outputs:` sections | Default is input; `Annotated[type, Out]` for outputs |
+| Step invocation | `cab: wsclean` under `steps:` | `from cultcargo.cabs import wsclean; wsclean(...)` |
 | Variable substitution | `"{recipe.param}"` | Python variable |
 | Conditional logic | `assign_based_on` + `skip:` expressions | `if`/`elif`/`else` |
 | Loops | `for_loop:` YAML block | `for x in items:` |
@@ -461,56 +451,56 @@ Or just name the parameter what the tool expects and use a descriptive docstring
 | Sub-recipes | Nested `recipe:` block or `_use:` | Function call |
 | Output references | `"{previous.restored}"`, `"{steps.image.dirty}"` | `result.restored`, `img.dirty` |
 | Expression evaluation | `=BASENAME(recipe.ms)` | `Path(ms).stem` |
+| Optional params | `=IFSET(recipe.param)` | `param` — `None` is auto-skipped |
+| Caching | `skip_if_outputs: fresh` | `_cache="fresh"` |
 
 ---
 
 ## Open Design Questions
 
-### 1. How does `stimela.run()` find the cab?
-
-Option A — global registry (like current cultcargo):
-```python
-stimela.run("wsclean", ms=ms)  # looks up "wsclean" in global cab registry
-```
-
-Option B — explicit import:
-```python
-from cultcargo import wsclean
-wsclean.run(ms=ms)  # or wsclean(ms=ms)
-```
-
-Option A is simpler and matches current usage. Option B gives IDE autocomplete on cab names.
-
-### 2. How are outputs declared for Python cabs?
-
-```python
-# Option A: return annotation
-@stimela.cab(command="wsclean")
-def wsclean(ms: MS) -> stimela.Outputs(restored=File, dirty=File): ...
-
-# Option B: decorator parameter
-@stimela.cab(command="wsclean", outputs={"restored": File, "dirty": File})
-def wsclean(ms: MS): ...
-
-# Option C: class-based
-class WscleanOutputs(stimela.Outputs):
-    restored: File
-    dirty: File
-```
-
-### 3. Should `stimela.run()` raise on failure or return a result?
+### 1. Should cab calls raise on failure or return a result?
 
 ```python
 # Option A: raise (like subprocess.run(check=True))
-result = stimela.run("wsclean", ms=ms)  # raises on failure
+result = wsclean(ms=ms)  # raises on failure
 
 # Option B: return result, check explicitly
-result = stimela.run("wsclean", ms=ms, check=False)
+result = wsclean(ms=ms, _check=False)
 if not result.success:
     handle_error()
 ```
 
-Recommendation: raise by default (most recipes want fail-fast), with `check=False` opt-out.
+Recommendation: raise by default (most recipes want fail-fast), with `_check=False` opt-out.
+
+### 2. How are cab packages structured?
+
+```python
+# Option A: flat namespace
+from cultcargo.cabs import wsclean, cubical, quartical
+
+# Option B: nested by tool category
+from cultcargo.cabs.imaging import wsclean
+from cultcargo.cabs.calibration import cubical
+```
+
+Recommendation: Option A (flat) for simplicity. Packages with many cabs can use
+`__init__.py` re-exports to keep imports clean.
+
+### 3. Wranglers — where do they live?
+
+Wranglers (regex-based output processors) are a cab-level concern. In YAML cabs they
+stay in the YAML. In Python cabs:
+
+```python
+@stimela.cab(
+    command="wsclean",
+    wranglers={
+        r"error reading file (.*)": stimela.DeclareError,
+        r"WARNING: (.*)": stimela.ChangeSeverity("WARNING"),
+    },
+)
+def wsclean(...): ...
+```
 
 ---
 

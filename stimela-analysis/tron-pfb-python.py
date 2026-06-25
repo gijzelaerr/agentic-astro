@@ -6,26 +6,55 @@ This is the acid test from Discussion #567: does the Python API produce
 something at least as readable as the YAML original?
 
 YAML original: 568 lines (breifast-tron/breifast/recipes/tron-pfb.yml)
-Python version: ~290 lines of recipe logic + ~50 lines of config dataclasses
+Python version: ~300 lines of recipe logic + ~50 lines of config dataclasses
 
 NOT runnable code — this is an API design sketch for discussion.
-The stimela.run() calls, @stimela.recipe decorator, and typed result
-objects shown here are the proposed Stimela3 API.
 
 Key API conventions used:
-    stimela.run("cab", ...) — run a cab, returns typed result object
-    result.output_name     — access cab outputs as typed attributes
-    _cache="fresh"         — skip step if outputs exist and are newer than inputs
-    _cache="exist"         — skip step if outputs exist at all
-    _tags=["a", "b"]       — tag steps for selective execution (stimela exec ... --tags a)
-    _backend="singularity" — override backend for this step
-    None parameters        — auto-skipped (replaces =IFSET() from YAML)
+    @stimela.recipe              — marks a function as a recipe
+    Annotated[type, Out, Info()] — annotate parameters as inputs (default) or outputs
+    cab(params, ...)             — cab objects imported from packages, called with ()
+    result.output_name           — access cab outputs as typed attributes
+    _cache="fresh"               — skip step if outputs exist and are newer than inputs
+    _tags=["a", "b"]             — tag steps for selective execution
+    _backend="singularity"       — override backend for this step
+    None parameters              — auto-skipped (replaces =IFSET() from YAML)
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Annotated
 
 import stimela
+from stimela import Info, Out
+
+# Cab imports — each package exposes its cabs as importable objects.
+# The cab object knows its command, parameter schema, and flavour.
+# Calling it validates params, constructs the command, and dispatches to the backend.
+from cultcargo.cabs import bdsf_catalog
+from breifast.cabs import (
+    consolidate_detections,
+    extract_lightcurves,
+    flag_cube,
+    make_baseline_image,
+    make_region_cutouts,
+    match_catalogs,
+    merge_catalogs,
+    plot_lightcurves,
+    render_deep_cutouts,
+    render_detection_maps,
+    render_eta_v_plots,
+    render_html,
+    render_regions,
+    validate_tron_outputs,
+    zarr_to_fits,
+)
+from breifast.recipes import tron_breifast, tron_brb_spectra
+from breifast.cabs import copy as utils_copy, build_breifast_database
+from pfb_imaging.cabs import hci
+from suricat.recipes import suricat_init
 
 
 def stripext(path) -> str:
@@ -37,74 +66,84 @@ def stripext(path) -> str:
 
 @dataclass
 class ColumnConfig:
-    data: str = "CORRECTED_DATA-MODEL_DATA"
-    model: str | None = None
-    sigma: str | None = None
-    weight: str = "WEIGHT_SPECTRUM"
-    flag: str = "FLAG"
+    """Visibility column configuration."""
+    data: Annotated[str, Info("corrected visibilities column")] = "CORRECTED_DATA-MODEL_DATA"
+    model: Annotated[str | None, Info("model visibilities column")] = None
+    sigma: Annotated[str | None, Info("sigma column")] = None
+    weight: Annotated[str, Info("weight column")] = "WEIGHT_SPECTRUM"
+    flag: Annotated[str, Info("flag column")] = "FLAG"
 
 
 @dataclass
 class HtcConfig:
     """High time cadence imaging configuration."""
-    phase_dir: str | None = None
-    cadence: int = 1
-    npix: int | None = None
-    cell_size: float | None = None
-    field_of_view: float | None = None
-    super_resolution_factor: float | None = None
-    robustness: float = 0.0
-    freq_range: str | None = None
-    fields: list[int] | None = None
-    ddids: list[int] | None = None
-    scans: list[int] | None = None
-    l2_reweight_dof: float | None = None
-    nthreads: int = 1
-    psf_out: bool = False
-    psf_relative_size: float = 1.0
-    epsilon: float = 1e-4
-    double_accum: bool = False
-    precision: str = "single"
-    padding: float = 2.0
-    images_per_chunk: int | None = None
-    max_simul_chunks: int | None = None
-    wgt_mode: str = "minvar"
-
-
-# --- Sub-recipe: referenced but defined elsewhere ---
-# suricat_init, tron_breifast, tron_brb_spectra are separate recipe modules
+    phase_dir: Annotated[str | None, Info("rephase visibilities to this phase center")] = None
+    cadence: Annotated[int, Info("raw cube imaging time cadence, in integrations")] = 1
+    npix: Annotated[int | None, Info("size of cube, in pixels")] = None
+    cell_size: Annotated[float | None, Info("pixel size in arcseconds")] = None
+    field_of_view: Annotated[float | None, Info("field of view to image in degrees")] = None
+    super_resolution_factor: Annotated[float | None, Info("how much to oversample Nyquist by")] = None
+    robustness: Annotated[float, Info("robustness value for Briggs weighting")] = 0.0
+    freq_range: Annotated[str | None, Info("frequency range to image in Hz")] = None
+    fields: Annotated[list[int] | None, Info("list of FIELD_IDs to image")] = None
+    ddids: Annotated[list[int] | None, Info("list of DATA_DESC_IDs to image")] = None
+    scans: Annotated[list[int] | None, Info("list of SCAN_NUMBERs to image")] = None
+    l2_reweight_dof: Annotated[float | None, Info("robust reweighting degrees of freedom")] = None
+    nthreads: Annotated[int, Info("number of threads per worker")] = 1
+    psf_out: Annotated[bool, Info("output PSF image")] = False
+    psf_relative_size: Annotated[float, Info("PSF size relative to image")] = 1.0
+    epsilon: Annotated[float, Info("gridding precision")] = 1e-4
+    double_accum: Annotated[bool, Info("use double precision accumulation")] = False
+    precision: Annotated[str, Info("gridding precision")] = "single"
+    padding: Annotated[float, Info("padding factor during imaging")] = 2.0
+    images_per_chunk: Annotated[int | None, Info("images per chunk (performance tuning)")] = None
+    max_simul_chunks: Annotated[int | None, Info("max simultaneous chunks (performance tuning)")] = None
+    wgt_mode: Annotated[str, Info("Stokes weight computation mode")] = "minvar"
 
 
 # --- The main TRON recipe ---
 
 @stimela.recipe
 def tron(
-    obs: str,
-    ms: list[stimela.URI],
-    primary_beam_band: stimela.Choices["U", "L", "S0", "S1", "S2", "S3", "S4"],
-    deep_image: stimela.File,
-    dir_out: stimela.Directory,
+    # required inputs
+    obs: Annotated[str, Info(
+        "Observation label. Used to label output products. "
+        "Short, informative strings e.g. 3C147-L are recommended."
+    )],
+    ms: Annotated[list[stimela.URI], Info("input measurement set(s)")],
+    primary_beam_band: Annotated[
+        stimela.Choices["U", "L", "S0", "S1", "S2", "S3", "S4"],
+        Info("primary beam band for suricat beam models"),
+    ],
+    deep_image: Annotated[stimela.File, Info(
+        "deep image of field, required to make a baseline detection image"
+    )],
+    # required outputs
+    dir_out: Annotated[stimela.Directory, Out, Info(
+        "output directory where products will be generated"
+    )],
     # grouped configs
     column: ColumnConfig = field(default_factory=ColumnConfig),
     htc: HtcConfig = field(default_factory=HtcConfig),
     # optional inputs
-    stokes: str = "I",
-    gain_table: stimela.URI | None = None,
-    max_time_gap: float = 3600,
-    interesting_regions: stimela.File | None = None,
-    nlc: int | None = 100,
-    lightcurves_within: str = "1deg",
-    publish_plots: bool = False,
-    publish_plot_title: str = "Observation {obs}: peak $ {peak_ujy:.0f}\\pm{peak_std_ujy:.0f} $ uJy",
-    spectrum_sources: list[str] = field(default_factory=list),
-    ncpu: int | None = None,
-    enable_fits_cubes: bool = True,
-    enable_pimenton_cutouts: bool = False,
-    flag_excess_rms: float = 1.5,
-    beam_model: stimela.URI | None = None,
-    inject_transients: stimela.File | None = None,
-    # outputs
-    dir_tmp: stimela.Directory = "/tmp",
+    stokes: Annotated[str, Info("Stokes parameters to process, e.g. I, IV, IQUV")] = "I",
+    gain_table: Annotated[stimela.URI | None, Info("optional QuartiCal gain table")] = None,
+    max_time_gap: Annotated[float, Info("time gap in seconds to split convolution")] = 3600,
+    interesting_regions: Annotated[stimela.File | None, Info(
+        "regions file with interesting sources for unconditional lightcurve extraction"
+    )] = None,
+    nlc: Annotated[int | None, Info("number of lightcurves to extract, -1 for all")] = 100,
+    lightcurves_within: Annotated[str, Info("only extract lightcurves within this distance of centre")] = "1deg",
+    publish_plots: Annotated[bool, Info("make publication-quality lightcurve plots")] = False,
+    spectrum_sources: Annotated[list[str], Info("sources for single-interval spectra")] = field(default_factory=list),
+    ncpu: Annotated[int | None, Info("number of CPUs/processes to use")] = None,
+    enable_fits_cubes: Annotated[bool, Info("enable output of FITS cubes")] = True,
+    enable_pimenton_cutouts: Annotated[bool, Info("enable Pimenton/ESASky cutouts")] = False,
+    flag_excess_rms: Annotated[float, Info("flag slices with rms > N * median(rms)")] = 1.5,
+    beam_model: Annotated[stimela.URI | None, Info("beam model for image-htc step")] = None,
+    inject_transients: Annotated[stimela.File | None, Info("transient injection file (.yaml)")] = None,
+    # optional outputs
+    dir_tmp: Annotated[stimela.Directory, Out, Info("temporary directory")] = "/tmp",
 ):
     """TRON: Transient Radio Observations for Newbies — pfb HCI version."""
 
@@ -118,11 +157,11 @@ def tron(
         ncpu = stimela.config.run.ncpu_physical
 
     # --- Step 1: Image at high time cadence ---
-    htc_result = stimela.run("hci",
+    htc_result = hci(
         ms=ms,
         obs_label=obs,
         data_column=column.data,
-        weight_column=column.weight,       # None params are auto-skipped
+        weight_column=column.weight,
         model_column=column.model,
         flag_column=column.flag,
         gain_table=gain_table,
@@ -165,15 +204,15 @@ def tron(
     )
 
     # --- Step 2: Flag excess RMS planes ---
-    stimela.run("breifast.flag-cube",
+    flag_cube(
         cds=htc_result.output_dataset,
         flag_excess_rms=flag_excess_rms,
         _cache="fresh",
     )
 
-    # --- Step 3: Convert time-mean to FITS ---
+    # --- Step 3-4: Convert cubes to FITS ---
     if enable_fits_cubes:
-        stimela.run("breifast.zarr-to-fits",
+        zarr_to_fits(
             cds=htc_result.output_dataset,
             out_image=f"{stripext(htc_result.output_dataset)}.mean.fits",
             drop_frequency_axis=True,
@@ -181,10 +220,7 @@ def tron(
             _tags=["lightcurves", "cubes_to_fits", "cubes"],
             _cache="fresh",
         )
-
-    # --- Step 4: Convert full cube to FITS ---
-    if enable_fits_cubes:
-        stimela.run("breifast.zarr-to-fits",
+        zarr_to_fits(
             cds=htc_result.output_dataset,
             out_image=f"{stripext(htc_result.output_dataset)}.fits",
             drop_frequency_axis=True,
@@ -197,7 +233,7 @@ def tron(
     # --- Step 5: Primary beams ---
     beams = None
     if primary_beam_band:
-        beams = stimela.run("suricat-init",
+        beams = suricat_init(
             dir_out="beam",
             band=primary_beam_band,
             mdv_beams=f"beam/mdv-beams-{primary_beam_band}.npz",
@@ -207,7 +243,7 @@ def tron(
         )
 
     # --- Step 6: Copy deep image ---
-    deep_copy = stimela.run("utils.copy",
+    deep_copy = utils_copy(
         input_path=deep_image,
         output_path=f"{dir_deep_image}/deep-image.fits",
         _backend="native",
@@ -215,7 +251,7 @@ def tron(
     )
 
     # --- Step 7: Make baseline image ---
-    baseline = stimela.run("breifast.make-baseline-image",
+    baseline = make_baseline_image(
         flux_image=deep_copy.output_path,
         target=htc_result.output_dataset,
         max_filter_size=15,
@@ -224,7 +260,7 @@ def tron(
     )
 
     # --- Step 8: Breifast multi-timescale search ---
-    breifast_result = stimela.run("tron-breifast",
+    breifast_result = tron_breifast(
         dir_out=dir_scales,
         baseline_image=baseline.baseline_image,
         cds=htc_result.output_dataset,
@@ -235,7 +271,7 @@ def tron(
     )
 
     # --- Step 9: Consolidate detections ---
-    consolidated = stimela.run("breifast.consolidate-detections",
+    consolidated = consolidate_detections(
         catalogs=breifast_result.detection_catalogs,
         output_catalog=f"{dir_out}/unified-detections.ecsv",
         _cache="fresh",
@@ -243,7 +279,7 @@ def tron(
     )
 
     # --- Step 10: Render detection regions ---
-    stimela.run("breifast.render-regions",
+    render_regions(
         catalog=consolidated.output_catalog,
         output_regions=f"{stripext(consolidated.output_catalog)}.reg",
         _cache="fresh",
@@ -251,7 +287,7 @@ def tron(
     )
 
     # --- Step 11: Source finder (runs in Singularity) ---
-    source_finder = stimela.run("bdsf.catalog",
+    source_finder = bdsf_catalog(
         image=deep_copy.output_path,
         thresh_pix=4,
         thresh_isl=3,
@@ -266,7 +302,7 @@ def tron(
     )
 
     # --- Step 12: Master catalog ---
-    master_cat = stimela.run("breifast.match-catalogs",
+    master_cat = match_catalogs(
         image=deep_copy.output_path,
         detection_catalog=consolidated.output_catalog,
         interesting_regions=interesting_regions,
@@ -278,7 +314,7 @@ def tron(
     )
 
     # --- Step 13: Extract lightcurves ---
-    lc_extract = stimela.run("breifast.extract-lightcurves",
+    lc_extract = extract_lightcurves(
         cds=htc_result.output_dataset,
         catalog=master_cat.output_catalog,
         output_dir=f"{dir_out}/lightcurves",
@@ -296,7 +332,7 @@ def tron(
     )
 
     # --- Step 14: Plot lightcurves ---
-    lc_plot = stimela.run("breifast.plot-lightcurves",
+    lc_plot = plot_lightcurves(
         lc_xds_paths=lc_extract.lc_xds_paths,
         catalog=master_cat.output_catalog,
         output_dir=lc_extract.output_dir,
@@ -311,7 +347,7 @@ def tron(
 
     # --- Step 15: Extract spectra (optional) ---
     if spectrum_sources:
-        stimela.run("tron-brb-spectra",
+        tron_brb_spectra(
             dir_out=dir_out,
             sources=spectrum_sources,
             nbands=[2, 3, 4, 5],
@@ -319,11 +355,7 @@ def tron(
             cds=htc_result.stacked_ds,
             catalog=consolidated.output_catalog,
             ms=ms,
-            column=column.residual if hasattr(column, "residual") else column.data,
-            subtract_model=not hasattr(column, "residual"),
-            weight=htc.weight,
-            size=htc.size,
-            scale=htc.scale,
+            column=column.data,
             stokes=stokes,
             temp_dir=dir_tmp,
             _tags=["spectra"],
@@ -332,7 +364,7 @@ def tron(
     # --- Step 16: Pimenton cutouts (optional) ---
     pimenton = None
     if enable_pimenton_cutouts:
-        pimenton = stimela.run("breifast.make-region-cutouts",
+        pimenton = make_region_cutouts(
             catalog=consolidated.output_catalog,
             output_dir=f"{dir_out}/esasky-cutouts",
             output_summary=f"{dir_out}/esasky-cutouts/summary.txt",
@@ -343,7 +375,7 @@ def tron(
         )
 
     # --- Step 17: Deep cutouts ---
-    deep_cutouts = stimela.run("breifast.render-deep-cutouts",
+    deep_cutouts = render_deep_cutouts(
         catalogs=[consolidated.output_catalog],
         deep_image=deep_copy.output_path,
         output_dir=f"{dir_out}/cutouts",
@@ -353,7 +385,7 @@ def tron(
     )
 
     # --- Step 18: Detection maps ---
-    det_maps = stimela.run("breifast.render-detection-maps",
+    det_maps = render_detection_maps(
         catalogs=[consolidated.output_catalog],
         deep_image=deep_copy.output_path,
         output_dir=f"{dir_out}/cutouts",
@@ -363,7 +395,7 @@ def tron(
     )
 
     # --- Step 19: Eta-V plots ---
-    eta_v = stimela.run("breifast.render-eta-v-plots",
+    eta_v = render_eta_v_plots(
         catalog=consolidated.output_catalog,
         lc_stats=lc_plot.stats_catalogs,
         output_dir=f"{lc_extract.output_dir}/eta-v-plots",
@@ -384,7 +416,7 @@ def tron(
         lc_plot.dp_catalog,
     ])
 
-    merged = stimela.run("breifast.merge-catalogs",
+    merged = merge_catalogs(
         catalogs=dp_catalogs,
         output_catalog=f"{dir_out}/unified-products.ecsv",
         _cache="fresh",
@@ -392,7 +424,7 @@ def tron(
     )
 
     # --- Step 21: Render HTML summary ---
-    stimela.run("breifast.render-html",
+    render_html(
         catalogs=[consolidated.output_catalog],
         dp_catalogs=[merged.output_catalog],
         output_html=f"{stripext(consolidated.output_catalog)}.html",
@@ -401,7 +433,7 @@ def tron(
     )
 
     # --- Step 22: Build SQLite database ---
-    stimela.run("utils.build-breifast-database",
+    build_breifast_database(
         candidates_catalogs=breifast_result.candidate_catalogs,
         detections_catalogs=breifast_result.detection_catalogs,
         unified_detections_catalog=consolidated.output_catalog,
@@ -419,7 +451,7 @@ def tron(
     )
 
     # --- Step 23: Validate outputs ---
-    stimela.run("breifast.validate-tron-outputs",
+    validate_tron_outputs(
         directory=dir_out,
         require_fits=enable_fits_cubes,
     )

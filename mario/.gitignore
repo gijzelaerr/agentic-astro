@@ -1,0 +1,16 @@
+# Cloned repos (Mario can clone these himself)
+museek/
+ivory/
+Simeer/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Output files
+*.pickle
+*.png
+*.npz
+test_dataset/

@@ -9,6 +9,8 @@ Requirements:
     # plus: katdal, astropy, healpy, numpy, matplotlib
 """
 
+import matplotlib
+matplotlib.use("Agg")
 import numpy as np
 import matplotlib.pyplot as plt
 from astropy.coordinates import EarthLocation
